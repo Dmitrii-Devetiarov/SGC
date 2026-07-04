@@ -15,6 +15,7 @@ from scipy.ndimage import gaussian_filter
 import chromadb
 import subprocess
 import os
+import platform
 
 from utils import load_config
 from yandex_api import YandexAIClient
@@ -58,7 +59,6 @@ st.sidebar.title("🧪 SGC")
 st.sidebar.markdown("*Scientific Gap Cartography*")
 st.sidebar.markdown("Интерпретируемый движок научных гипотез")
 
-# Режим
 mode = st.sidebar.radio("Режим работы", ["🎯 По запросу", "🔍 Автогенерация"])
 
 st.sidebar.markdown("---")
@@ -110,7 +110,6 @@ st.markdown(
     "**Каждая гипотеза трассируется до исходных документов.**"
 )
 
-# Статистика
 count = collection.count()
 if count == 0:
     st.warning(
@@ -122,7 +121,6 @@ if count == 0:
 
 st.info(f"📚 Чанков в базе: **{count}**")
 
-# Запрос
 query = ""
 if "По запросу" in mode:
     query = st.text_input(
@@ -132,6 +130,10 @@ if "По запросу" in mode:
 
 can_run = "Автогенерация" in mode or ("По запросу" in mode and query.strip())
 run = st.button("🚀 Сгенерировать гипотезы", type="primary", disabled=not can_run, use_container_width=True)
+
+# Сбрасываем кеш гипотез при новом запуске
+if run:
+    st.session_state.hypotheses_data = []
 
 if not run:
     st.markdown("---")
@@ -146,14 +148,20 @@ if not run:
 # Пайплайн
 # ------------------------------------------------------------------
 
-# Загружаем данные
 with st.spinner("📡 Загрузка данных..."):
     result = collection.get(include=["documents", "embeddings", "metadatas"])
     chunks = []
     embeddings = []
     for doc, emb, meta in zip(result["documents"], result["embeddings"], result["metadatas"]):
-        chunks.append({"text": doc, "source": meta.get("source", ""), "page": meta.get("page", 0)})
-        embeddings.append(emb)
+        if doc and emb is not None and len(emb) > 0:
+            chunks.append({
+                "text": doc,
+                "source": meta.get("source", ""),
+                "page": meta.get("page", 0),
+                "chunk_index": meta.get("chunk_index", 0),
+                "is_ocr": meta.get("is_ocr", False),
+            })
+            embeddings.append(emb)
 
 if len(chunks) < 20:
     st.error("⚠️ Недостаточно данных. Проиндексируйте хотя бы 20 чанков.")
@@ -174,7 +182,11 @@ with st.spinner("🔍 Поиск научных пробелов..."):
         boundary_top_n=config["gaps"]["boundary_top_n"],
     )
 
-    gaps = finder.find_gaps(chunks, [np.array(e) for e in embeddings], target_vector=query_embedding)
+    gaps = finder.find_gaps(
+        chunks,
+        [np.array(e) for e in embeddings],
+        target_vector=query_embedding,
+    )
 
 if not gaps:
     st.warning("🔍 Не найдено значимых пробелов. Уменьшите глубину разрыва или измените запрос.")
@@ -189,16 +201,23 @@ st.success(f"🎯 Найдено пробелов: **{len(gaps)}**. Показа
 verbaizer = Verbaizer(api)
 top_gaps = gaps[:n_gaps]
 
+if "hypotheses_data" not in st.session_state:
+    st.session_state.hypotheses_data = []
+
 st.markdown("---")
 st.header("📋 Гипотезы")
 
 for i, gap in enumerate(top_gaps, start=1):
-    with st.spinner(f"📝 Формулировка гипотезы #{i}..."):
-        result = verbaizer.verbaize({
-            "boundary_chunks": gap.boundary_chunks,
-            "depth": gap.depth,
-            "cluster_ids": gap.cluster_ids,
-        }, target_query=query)
+    if i <= len(st.session_state.hypotheses_data):
+        result = st.session_state.hypotheses_data[i - 1]
+    else:
+        with st.spinner(f"📝 Формулировка гипотезы #{i}..."):
+            result = verbaizer.verbaize({
+                "boundary_chunks": gap.boundary_chunks,
+                "depth": gap.depth,
+                "cluster_ids": gap.cluster_ids,
+            }, target_query=query)
+        st.session_state.hypotheses_data.append(result)
 
     with st.expander(
         f"**Гипотеза #{i}** | Глубина разрыва: {gap.depth:.3f} | Кластеры: {gap.cluster_ids}",
@@ -216,9 +235,18 @@ for i, gap in enumerate(top_gaps, start=1):
         st.success(result.get("verification_plan", "—"))
 
         if result.get("sources"):
-            st.markdown("**📄 Источники:**")
+            st.markdown("**📄 Источники (нажмите для просмотра фрагмента):**")
             for s in result["sources"]:
-                st.caption(f"• {s}")
+                chunk_text = ""
+                for bc in gap.boundary_chunks:
+                    if f"{bc.get('source','')} (стр. {bc.get('page','')})" == s:
+                        chunk_text = bc.get("text", "")
+                        break
+                with st.popover(s):
+                    if chunk_text:
+                        st.caption(chunk_text[:800] + ("..." if len(chunk_text) > 800 else ""))
+                    else:
+                        st.caption("Текст фрагмента не загружен")
 
 # ------------------------------------------------------------------
 # Визуализация
@@ -281,49 +309,52 @@ st.pyplot(fig)
 # Экспорт
 # ------------------------------------------------------------------
 
-# Вместо блока экспорта в app.py:
-
 st.markdown("---")
 st.header("📥 Экспорт")
 
-export_dir = st.text_input("Папка для сохранения", "./output", help="Куда сохранить файлы с гипотезами")
+# Собираем данные для экспорта один раз
+@st.cache_data
+def prepare_export_data():
+    hyps_docx = []
+    hyps_json = []
+    for idx, r in enumerate(st.session_state.hypotheses_data, start=1):
+        r_copy = r.copy()
+        r_copy["gap_id"] = idx
+        r_copy["gap_depth"] = top_gaps[idx - 1].depth if idx <= len(top_gaps) else 0
+        hyps_docx.append(r_copy)
+        
+        r_json = {k: v for k, v in r_copy.items() if k != "raw_response"}
+        hyps_json.append(r_json)
+    return hyps_docx, hyps_json
 
-c1, c2 = st.columns(2)
+hyps_docx, hyps_json = prepare_export_data()
 
-if c1.button("📄 Скачать DOCX", use_container_width=True):
-    from exporter import export_to_docx
-    os.makedirs(export_dir, exist_ok=True)
-    hyps = []
-    for i, gap in enumerate(top_gaps, start=1):
-        r = verbaizer.verbaize({
-            "boundary_chunks": gap.boundary_chunks,
-            "depth": gap.depth,
-            "cluster_ids": gap.cluster_ids,
-        }, target_query=query)
-        r["gap_id"] = i
-        r["gap_depth"] = gap.depth
-        hyps.append(r)
-    filepath = os.path.join(export_dir, "sgc_hypotheses.docx")
-    export_to_docx(hyps, query, filepath)
-    st.success(f"Сохранено: {filepath}")
+# DOCX
+from exporter import export_to_docx
+import tempfile
+docx_data = None
+with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
+    export_to_docx(hyps_docx, query, tmp.name)
+    with open(tmp.name, "rb") as f:
+        docx_data = f.read()
+    os.unlink(tmp.name)
 
-if c2.button("📊 Скачать JSON", use_container_width=True):
-    import json
-    os.makedirs(export_dir, exist_ok=True)
-    hyps = []
-    for i, gap in enumerate(top_gaps, start=1):
-        r = verbaizer.verbaize({
-            "boundary_chunks": gap.boundary_chunks,
-            "depth": gap.depth,
-            "cluster_ids": gap.cluster_ids,
-        }, target_query=query)
-        r["gap_id"] = i
-        r["gap_depth"] = gap.depth
-        r.pop("raw_response", None)
-        hyps.append(r)
-    filepath = os.path.join(export_dir, "sgc_hypotheses.json")
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(hyps, f, ensure_ascii=False, indent=2)
-    st.success(f"Сохранено: {filepath}")
+st.download_button(
+    "📄 Скачать DOCX",
+    docx_data,
+    file_name="sgc_hypotheses.docx",
+    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+)
+
+# JSON
+import json
+json_data = json.dumps(hyps_json, ensure_ascii=False, indent=2).encode("utf-8")
+st.download_button(
+    "📊 Скачать JSON",
+    json_data,
+    file_name="sgc_hypotheses.json",
+    mime="application/json",
+)
+
 st.markdown("---")
-st.caption("🧪 SGC — Scientific Gap Cartography | Хакатон 2026| Все гипотезы трассируются до исходных документов")
+st.caption("🧪 SGC — Scientific Gap Cartography | Хакатон | Все гипотезы трассируются до исходных документов")
