@@ -1,0 +1,78 @@
+# Конфигурация SGC (Scientific Gap Cartography)
+# ----------------------------------------------
+
+# API YandexAI
+yandex_api:
+  api_key: "${YANDEX_API_KEY}"           # API-ключ (указан в личном кабинете)
+  folder_id: "${YANDEX_FOLDER_ID}"       # ID каталога
+  base_url: "https://llm.api.cloud.yandex.net/v1"  # OpenAI-совместимый эндпоинт
+  emb_base_url: "https://emb.api.cloud.yandex.net/v1" 
+  embedding_dim: 256                     # Размерность эмбеддингов (128, 256, 512, 768)
+  max_retries: 5                         # Повторных попыток при ошибке
+  retry_delay: 2.0                       # Задержка между попытками (сек)
+
+# Модели (URI формируются автоматически, здесь для справки)
+models:
+  embed_doc: "text-embeddings-v2-doc"    # Эмбеддинги чанков
+  embed_query: "text-embeddings-v2-query"  # Эмбеддинги запроса
+  gpt_pro: "yandexgpt-5.1"              # Вербализация гипотез
+  gpt_lite: "yandexgpt-5-lite"          # Перевод, извлечение предикатов
+  ocr_vision: "qwen3.6-35b-a3b"         # OCR сканов (мультимодальная)
+  
+
+# Пути
+paths:
+  data_input: "./data/input"             # Исходные документы
+  db: "./db"                             # Персистентная ChromaDB
+  output: "./output"                     # Экспорт гипотез
+
+# Чанкинг
+chunking:
+  chunk_size: 512                        # Токенов (слов) в чанке
+  chunk_overlap: 50                      # Перекрытие
+  min_chunk_words: 15                    # Минимум значащих слов (меньше — отсев)
+  ocr_dpi: 150                           # Разрешение рендера для OCR
+  ocr_max_width: 1200                    # Максимальная ширина изображения (сжатие)
+
+# UMAP и кластеризация
+umap:
+  n_neighbors: 15                        # Баланс локальное/глобальное
+  min_dist: 0.1                          # Минимальное расстояние между точками
+  metric: "cosine"                       # Метрика
+
+hdbscan:
+  min_cluster_size: 5                   # Минимальный размер кластера
+  min_samples: 3                         # Чувствительность к шуму
+
+# Поиск войдов (gap finding)
+gaps:
+  grid_size: 100                         # Размер сетки 2D-гистограммы
+  smooth_sigma: 1.5                      # Сигма гауссова размытия
+  min_gap_depth: 0.05                    # Минимальная "глубина" войда (процентиль)
+  boundary_top_n: 10                     # Сколько граничных чанков брать
+  overlap_threshold: 0.75 
+
+# Ранжирование гипотез (KPI — веса)
+ranking:
+  weights:
+    novelty: 0.30        # Новизна
+    feasibility: 0.25    # Реализуемость
+    impact: 0.30         # Потенциальный эффект
+    risk: 0.15           # Риски (инвертированный: чем ниже, тем лучше)
+
+  # Ограничения по умолчанию (могут переопределяться в интерфейсе)
+  constraints:
+    max_cost: null       # Максимальный бюджет (null = нет ограничений)
+    equipment: []        # Доступное оборудование (пусто = всё)
+    raw_materials: []    # Доступное сырьё (пусто = всё)
+    forbidden: []        # Запрещённые материалы/методы
+
+# Язык
+language:
+  target: "ru"                          # Целевой язык (переводим всё на русский)
+  detect_model: "lingua"                # Модуль определения языка
+
+# Логирование
+logging:
+  level: "INFO"                         # DEBUG, INFO, WARNING, ERROR
+  file: "sgc.log"                       # Файл лога (null = только консоль)
